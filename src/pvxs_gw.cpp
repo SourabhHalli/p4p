@@ -611,11 +611,15 @@ void onSubEvent(const std::shared_ptr<GWSubscription>& sub, const std::shared_pt
     for(unsigned i=0; i<4u; i++) {
         try {
 
-            log_warn_printf(_logmon, "XXXXXXXX ENTER onSubEvent %d\n", 0);
+            log_warn_printf(_logmon,
+                            "XXXXXXXX ENTER onSubEvent %u\n",
+                            i);
 
             auto val(cli->pop());
 
-            log_warn_printf(_logmon, "XXXXXXXX AFTER pop %d\n", 0);
+            log_warn_printf(_logmon,
+                            "XXXXXXXX AFTER pop %u\n",
+                            i);
 
             if(!val)
                 return; // queue emptied
@@ -624,30 +628,58 @@ void onSubEvent(const std::shared_ptr<GWSubscription>& sub, const std::shared_pt
                              "'%s' MONITOR event\n",
                              cli->name().c_str());
 
-            Guard G(us->lock);
+            std::vector<std::shared_ptr<server::MonitorControlOp>> controls;
 
-            log_warn_printf(_logmon, "XXXXXXXX BEFORE assign controls=%zu\n", sub->controls.size());
+            {
+                Guard G(us->lock);
 
-            sub->current.assign(val); // accumulate deltas
+                log_warn_printf(_logmon,
+                                "XXXXXXXX BEFORE assign controls=%zu\n",
+                                sub->controls.size());
 
-            log_warn_printf(_logmon, "XXXXXXXX AFTER assign %d\n", 0);
+                sub->current.assign(val); // accumulate deltas
+                sub->state = GWSubscription::Running;
 
-            sub->state = GWSubscription::Running;
+                controls = sub->controls;
 
-            for(auto& ctrl : sub->controls) {
+                log_warn_printf(_logmon,
+                                "XXXXXXXX AFTER assign %u\n",
+                                i);
+            }
 
-                log_warn_printf(_logmon, "XXXXXXXX BEFORE post ctrl=%p\n", (void*)ctrl.get());
+            std::ostringstream os;
+            os << val;
+
+            log_debug_printf(_logmon,
+                "'%s' MONITOR event post idx=%zu controls=%zu val=%s\n",
+                cli->name().c_str(),
+                size_t(i),
+                controls.size(),
+                os.str().c_str());
+
+            for(auto& ctrl : controls) {
+
+                log_warn_printf(_logmon,
+                                "XXXXXXXX BEFORE post ctrl=%p\n",
+                                (void*)ctrl.get());
+
+                log_debug_printf(_logmon,
+                    "'%s' MONITOR event post ctrl=%p\n",
+                    cli->name().c_str(),
+                    (void*)ctrl.get());
 
                 ctrl->post(val);
 
-                log_warn_printf(_logmon, "XXXXXXXX AFTER post ctrl=%p\n", (void*)ctrl.get());
+                log_warn_printf(_logmon,
+                                "XXXXXXXX AFTER post ctrl=%p\n",
+                                (void*)ctrl.get());
             }
 
         } catch(client::Finished&) {
 
-            log_warn_printf(_logmon, "XXXXXXXX client::Finished %d\n", 0);
-
-            log_debug_printf(_logmon, "'%s' MONITOR finish\n", cli->name().c_str());
+            log_debug_printf(_logmon,
+                             "'%s' MONITOR finish\n",
+                             cli->name().c_str());
 
             decltype (us->subscription) trash;
             decltype (sub->setups) setups;
@@ -655,6 +687,7 @@ void onSubEvent(const std::shared_ptr<GWSubscription>& sub, const std::shared_pt
 
             {
                 Guard G(us->lock);
+
                 trash = std::move(us->subscription);
                 setups = std::move(sub->setups);
                 controls = std::move(sub->controls);
@@ -668,32 +701,32 @@ void onSubEvent(const std::shared_ptr<GWSubscription>& sub, const std::shared_pt
 
         } catch(std::exception& e) {
 
-            log_warn_printf(_logmon, "XXXXXXXX EXCEPTION '%s' : %s\n", cli->name().c_str(), e.what());
-
-            log_warn_printf(_logmon, "'%s' MONITOR error: %s\n", cli->name().c_str(), e.what());
+            log_warn_printf(_logmon,
+                            "'%s' MONITOR error: %s\n",
+                            cli->name().c_str(),
+                            e.what());
         }
     }
 
-    log_debug_printf(_logmon, "'%s' MONITOR resched\n", cli->name().c_str());
+    log_debug_printf(_logmon,
+                     "'%s' MONITOR resched\n",
+                     cli->name().c_str());
 
+    // queue not empty, reschedule for later to give other subscriptions a chance
     us->workQ->push([sub, pv](){ onSubEvent(sub, pv); });
 }
-
 void GWChan::onSubscribe(const std::shared_ptr<GWChan>& pv,
                          std::unique_ptr<server::MonitorSetupOp>&& sop)
 {
+    // on server worker
+
     std::shared_ptr<server::MonitorSetupOp> op(std::move(sop));
 
-    log_warn_printf(_logmon, "XXXXXXXX ENTER onSubscribe '%s'\n", op->name().c_str());
-
     auto pvReq(op->pvRequest());
-
     auto docache = true;
     pvReq["record._options.cache"].as(docache);
 
     if(!docache && !pv->allow_uncached) {
-        log_warn_printf(_logmon, "XXXXXXXX uncached rejected '%s'\n", op->name().c_str());
-
         op->error("Gateway disallows uncachable monitor");
         return;
     }
@@ -702,14 +735,13 @@ void GWChan::onSubscribe(const std::shared_ptr<GWChan>& pv,
     std::shared_ptr<client::Subscription> cli;
 
     if(docache) {
+        // check for subscription to re-use
         Guard G(pv->us->lock);
 
         sub = pv->us->subscription.lock();
 
         if(sub) {
             cli = sub->upstream.lock();
-
-            log_warn_printf(_logmon, "XXXXXXXX reusing subscription '%s'\n", op->name().c_str());
         }
     }
 
@@ -717,10 +749,11 @@ void GWChan::onSubscribe(const std::shared_ptr<GWChan>& pv,
 
     if(create) {
 
-        log_warn_printf(_logmon, "XXXXXXXX creating subscription '%s'\n", op->name().c_str());
+        log_debug_printf(_logmon,
+                         "'%s' MONITOR new\n",
+                         op->name().c_str());
 
-        log_debug_printf(_logmon, "'%s' MONITOR new\n", op->name().c_str());
-
+        // start new subscription
         sub = std::make_shared<GWSubscription>();
 
         auto req = pv->us->upstream.monitor(pv->us->usname)
@@ -732,99 +765,99 @@ void GWChan::onSubscribe(const std::shared_ptr<GWChan>& pv,
             req.rawRequest(op->pvRequest());
 
         cli = req.event([sub, pv](client::Subscription& cli)
-        {
-            try {
-                cli.pop();
-
-                throw std::runtime_error("not error??");
-
-            } catch(std::exception& e){
-
-                log_warn_printf(_logmon, "XXXXXXXX setup exception '%s' : %s\n", cli.name().c_str(), e.what());
-
-                log_warn_printf(_logmon, "'%s' MONITOR setup error: %s\n", cli.name().c_str(), e.what());
-
-                decltype (pv->us->subscription) trash;
-                decltype (sub->setups) setups;
-
                 {
-                    Guard G(pv->us->lock);
-                    trash = std::move(pv->us->subscription);
-                    setups = std::move(sub->setups);
-                }
+                    try {
 
-                for(auto& op : setups)
-                    op->error(e.what());
-            }
-        })
-        .onInit([sub, pv](client::Subscription& cli,
-                          const Value& prototype)
-        {
-            log_warn_printf(_logmon,
-                            "XXXXXXXX onInit '%s'\n",
-                            cli.name().c_str());
+                        cli.pop();
+                        throw std::runtime_error("not error??");
 
-            log_debug_printf(_logmon,
-                             "'%s' MONITOR typed\n",
-                             cli.name().c_str());
+                    } catch(std::exception& e) {
 
-            cli.onEvent([sub, pv](client::Subscription& cli)
-            {
-                log_warn_printf(_logmon,
-                                "XXXXXXXX onEvent '%s'\n",
-                                cli.name().c_str());
+                        log_warn_printf(_logmon,
+                                        "'%s' MONITOR setup error: %s\n",
+                                        cli.name().c_str(),
+                                        e.what());
 
-                log_debug_printf(_logmon,
-                                 "'%s' MONITOR wakeup\n",
-                                 cli.name().c_str());
+                        decltype (pv->us->subscription) trash;
+                        decltype (sub->setups) setups;
 
-                pv->us->workQ->push([sub, pv]() {
-                    onSubEvent(sub, pv);
-                });
-            });
+                        {
+                            Guard G(pv->us->lock);
 
-            decltype (sub->setups) setups;
-            decltype (sub->controls) controls;
+                            trash = std::move(pv->us->subscription);
+                            setups = std::move(sub->setups);
+                        }
 
-            {
-                Guard G(pv->us->lock);
+                        for(auto& op : setups)
+                            op->error(e.what());
+                    }
+                })
+                .onInit([sub, pv](client::Subscription& cli,
+                                  const Value& prototype)
+                {
+                    log_debug_printf(_logmon,
+                                     "'%s' MONITOR typed\n",
+                                     cli.name().c_str());
 
-                sub->state = GWSubscription::Connected;
-                sub->current = prototype.clone();
+                    cli.onEvent([sub, pv](client::Subscription& cli)
+                    {
+                        log_debug_printf(_logmon,
+                                         "'%s' MONITOR wakeup\n",
+                                         cli.name().c_str());
 
-                setups = std::move(sub->setups);
-            }
+                        pv->us->workQ->push([sub, pv]() {
+                            onSubEvent(sub, pv);
+                        });
+                    });
 
-            for(auto& setup : setups) {
+                    decltype (sub->setups) setups;
+                    decltype (sub->controls) controls;
 
-                log_warn_printf(_logmon,
-                                "XXXXXXXX connect() setup %p\n",
-                                (void*)setup.get());
+                    {
+                        Guard G(pv->us->lock);
 
-                controls.push_back(setup->connect(sub->current));
-            }
+                        sub->state = GWSubscription::Connected;
+                        sub->current = prototype.clone();
 
-            {
-                Guard G(pv->us->lock);
+                        setups = std::move(sub->setups);
+                    }
 
-                for(auto&& ctrl : controls) {
+                    for(auto& setup : setups) {
 
-                    log_warn_printf(_logmon,
-                                    "XXXXXXXX store ctrl=%p\n",
-                                    (void*)ctrl.get());
+                        log_warn_printf(_logmon,
+                                        "XXXXXXXX connect setup=%p\n",
+                                        (void*)setup.get());
 
-                    sub->controls.push_back(std::move(ctrl));
-                }
-            }
-        })
-        .exec();
+                        controls.push_back(setup->connect(sub->current));
+                    }
+
+                    {
+                        Guard G(pv->us->lock);
+
+                        for(auto&& ctrl : controls) {
+
+                            log_warn_printf(_logmon,
+                                            "XXXXXXXX store ctrl=%p\n",
+                                            (void*)ctrl.get());
+
+                            sub->controls.push_back(std::move(ctrl));
+                        }
+                    }
+                })
+                .exec();
     }
 
+    // tie client subscription lifetime
     op->onClose([cli](const std::string&) {
-        log_warn_printf(_logmon,
-                        "XXXXXXXX onClose '%s'\n",
-                        cli ? cli->name().c_str() : "NULL");
+
+        log_debug_printf(_log,
+                         "sub close '%s'\n",
+                         cli->name().c_str());
     });
+
+    std::shared_ptr<server::MonitorControlOp> ctrl;
+    Value current;
+    GWSubscription::state_t state = GWSubscription::Connecting;
 
     {
         Guard G(pv->us->lock);
@@ -840,10 +873,6 @@ void GWChan::onSubscribe(const std::shared_ptr<GWChan>& pv,
 
         case GWSubscription::Connecting:
 
-            log_warn_printf(_logmon,
-                            "XXXXXXXX state CONNECTING '%s'\n",
-                            op->name().c_str());
-
             log_debug_printf(_logmon,
                              "'%s' MONITOR init conn\n",
                              op->name().c_str());
@@ -854,89 +883,59 @@ void GWChan::onSubscribe(const std::shared_ptr<GWChan>& pv,
         case GWSubscription::Connected:
         case GWSubscription::Running: {
 
-            log_warn_printf(_logmon,
-                            "XXXXXXXX state RUNNING '%s'\n",
-                            op->name().c_str());
-
             log_debug_printf(_logmon,
                              "'%s' MONITOR init run\n",
                              op->name().c_str());
 
-            auto ctrl(op->connect(sub->current));
+            ctrl = op->connect(sub->current);
 
-            log_warn_printf(_logmon,
-                            "XXXXXXXX connect returned ctrl=%p\n",
-                            (void*)ctrl.get());
-
-            if(sub->state == GWSubscription::Running) {
+            if(!ctrl) {
 
                 log_warn_printf(_logmon,
-                                "XXXXXXXX initial post ctrl=%p\n",
-                                (void*)ctrl.get());
+                    "'%s' MONITOR init run: op->connect() returned NULL state=%u\n",
+                    op->name().c_str(),
+                    unsigned(sub->state));
 
-                ctrl->post(sub->current);
+                break;
             }
 
-            sub->controls.emplace_back(std::move(ctrl));
+            current = sub->current;
+            state = sub->state;
+
+            log_warn_printf(_logmon,
+                            "XXXXXXXX init store ctrl=%p state=%u\n",
+                            (void*)ctrl.get(),
+                            unsigned(state));
+
+            sub->controls.emplace_back(ctrl);
 
             break;
         }
         }
     }
-}
 
-void GWSource::onCreate(std::unique_ptr<server::ChannelControl> &&op)
-{
-    // on server worker
+    if(ctrl && state == GWSubscription::Running) {
 
-    // Server worker may make synchronous calls to client worker.
-    // To avoid deadlock, client worker must not make synchronous calls to server worker
+        std::ostringstream os;
+        os << current;
 
-    // Server operation handles may hold strong references to client operation handles
-    // To avoid a reference loop, client operation handles must not hold strong refs.
-    // to server handles.
+        log_debug_printf(_logmon,
+            "'%s' MONITOR init run state=%u current=%s\n",
+            op->name().c_str(),
+            unsigned(state),
+            os.str().c_str());
 
-    std::shared_ptr<GWChan> pv;
-    {
-        PyLock L;
+        log_warn_printf(_logmon,
+                        "XXXXXXXX init BEFORE post ctrl=%p\n",
+                        (void*)ctrl.get());
 
-        pv = GWProvider_makeChannel(this, &op);
+        ctrl->post(current);
+
+        log_warn_printf(_logmon,
+                        "XXXXXXXX init AFTER post ctrl=%p\n",
+                        (void*)ctrl.get());
     }
-
-    if(!pv) {
-        return; // not our PV.  Let other GWSource s try.
-
-    } else if(!pv->us->connector->connected()) {
-        // ours, but something went wrong.
-        log_debug_printf(_log, "%p makeChannel returned '%s'\n", this,
-                         op ? op->name().c_str() : "dead channel");
-        if(op)
-            op->close();
-        return;
-    }
-
-    assert(pv->dschannel);
-    auto& ctrl = pv->dschannel;
-
-    ctrl->updateInfo(pv->reportInfo);
-
-    ctrl->onRPC([pv](std::unique_ptr<server::ExecOp>&& op, Value&& arg) mutable {
-        // on server worker
-        GWChan::onRPC(pv, std::move(op), std::move(arg));
-    });
-
-    ctrl->onOp([pv](std::unique_ptr<server::ConnectOp>&& sop) mutable { // INFO/GET/PUT
-        // on server worker
-        GWChan::onOp(pv, std::move(sop));
-    }); // onOp
-
-    ctrl->onSubscribe([pv](std::unique_ptr<server::MonitorSetupOp>&& sop) mutable {
-        GWChan::onSubscribe(pv, std::move(sop));
-    }); // onSubscribe
-
-    log_debug_printf(_log, "%p onCreate '%s' as '%s' success\n", this, pv->dsname.c_str(), pv->us->usname.c_str());
 }
-
 GWSearchResult GWSource::test(const std::string &usname)
 {
     std::shared_ptr<GWUpstream> newchan; // if !pair.second, must unlock before dtor of discarded chan
